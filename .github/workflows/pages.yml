@@ -23,18 +23,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck && npm run lint && npm test && npm run build:server
-      - name: Validate signaling configuration
-        env:
-          SIGNALING_URL: ${{ vars.VITE_SIGNALING_URL }}
-        run: node -e 'const u = new URL(process.env.SIGNALING_URL); if (u.protocol !== "wss:") throw new Error("Set repository variable VITE_SIGNALING_URL to your wss:// signaling endpoint");'
-      - run: npm run build
+      - name: Install browser for verification
+        run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Validate configuration and build frontend
+        run: npm run validate:production && npm run build
         env:
           VITE_BASE_PATH: './'
           VITE_SIGNALING_URL: ${{ vars.VITE_SIGNALING_URL }}
-          VITE_STUN_URL: ${{ vars.VITE_STUN_URL || 'stun:stun.l.google.com:19302' }}
+          VITE_STUN_URLS: ${{ vars.VITE_STUN_URLS || vars.VITE_STUN_URL || 'stun:stun.l.google.com:19302' }}
           VITE_TURN_URL: ${{ vars.VITE_TURN_URL }}
           VITE_TURN_USERNAME: ${{ vars.VITE_TURN_USERNAME }}
           VITE_TURN_CREDENTIAL: ${{ secrets.VITE_TURN_CREDENTIAL }}
+      - name: Check built Pages assets and shared links
+        run: npx tsx tests/pages-smoke.ts
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

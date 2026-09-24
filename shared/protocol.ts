@@ -13,14 +13,16 @@ export type ServerMessage =
   | { type: 'signal'; session: string; id: string; payload: Signal }
   | { type: 'peer-left' }
   | { type: 'error'; code: 'full' | 'invalid' | 'unavailable' | 'rate-limit'; message: string };
-const object = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+const object = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 export function isSignal(v: unknown): v is Signal {
   if (!object(v)) return false;
   if (v.kind === 'description')
     return (
       object(v.description) &&
-      ['offer', 'answer'].includes(String(v.description.type)) &&
+      (v.description.type === 'offer' || v.description.type === 'answer') &&
       typeof v.description.sdp === 'string' &&
+      v.description.sdp.length > 0 &&
       v.description.sdp.length < 60000
     );
   if (v.kind !== 'candidate' || !object(v.candidate)) return false;
@@ -38,6 +40,7 @@ export function isSignal(v: unknown): v is Signal {
   );
 }
 export function parseClientMessage(raw: string): ClientMessage | null {
+  if (raw.length > MAX_MESSAGE_BYTES) return null;
   try {
     const v: unknown = JSON.parse(raw);
     if (!object(v)) return null;
@@ -47,18 +50,36 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     if (
       v.type === 'signal' &&
       typeof v.session === 'string' &&
-      v.session.length <= 64 &&
+      /^[a-zA-Z0-9_-]{1,64}$/.test(v.session) &&
       typeof v.id === 'string' &&
-      v.id.length <= 64 &&
+      /^[a-zA-Z0-9_-]{1,64}$/.test(v.id) &&
       isSignal(v.payload)
-    )
-      return v as ClientMessage;
+    ) {
+      // Whitelist protocol fields; never forward arbitrary sender-supplied data.
+      const payload: Signal =
+        v.payload.kind === 'description'
+          ? {
+              kind: 'description',
+              description: { type: v.payload.description.type, sdp: v.payload.description.sdp },
+            }
+          : {
+              kind: 'candidate',
+              candidate: {
+                candidate: v.payload.candidate.candidate,
+                sdpMid: v.payload.candidate.sdpMid,
+                sdpMLineIndex: v.payload.candidate.sdpMLineIndex,
+                usernameFragment: v.payload.candidate.usernameFragment,
+              },
+            };
+      return { type: 'signal', session: v.session, id: v.id, payload };
+    }
   } catch {
     /* Invalid input is never relayed. */
   }
   return null;
 }
 export function parseServerMessage(raw: string): ServerMessage | null {
+  if (raw.length > MAX_MESSAGE_BYTES) return null;
   try {
     const v: unknown = JSON.parse(raw);
     if (!object(v)) return null;
@@ -66,15 +87,20 @@ export function parseServerMessage(raw: string): ServerMessage | null {
     if (
       v.type === 'paired' &&
       typeof v.session === 'string' &&
-      v.session.length <= 64 &&
+      /^[a-zA-Z0-9_-]{1,64}$/.test(v.session) &&
       typeof v.offerer === 'boolean'
     )
       return v as ServerMessage;
-    if (v.type === 'signal' && parseClientMessage(raw)) return v as ServerMessage;
+    if (v.type === 'signal') {
+      const signal = parseClientMessage(raw);
+      return signal?.type === 'signal' ? signal : null;
+    }
     if (
       v.type === 'error' &&
-      ['full', 'invalid', 'unavailable', 'rate-limit'].includes(String(v.code)) &&
-      typeof v.message === 'string'
+      typeof v.code === 'string' &&
+      ['full', 'invalid', 'unavailable', 'rate-limit'].includes(v.code) &&
+      typeof v.message === 'string' &&
+      v.message.length <= 512
     )
       return v as ServerMessage;
   } catch {

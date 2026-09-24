@@ -4,7 +4,15 @@ import { Peer } from '../webrtc/peer';
 import { iceConfiguration, signalingUrl } from '../webrtc/config';
 import type { ServerMessage } from '../../shared/protocol';
 export type Phase =
-  'preview' | 'joining' | 'waiting' | 'connecting' | 'connected' | 'interrupted' | 'ended' | 'full';
+  | 'preview'
+  | 'joining'
+  | 'waiting'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'interrupted'
+  | 'ended'
+  | 'full';
 export interface MeetingState {
   phase: Phase;
   local: MediaStream | null;
@@ -42,6 +50,11 @@ export class MeetingController {
   private peer?: Peer;
   private session?: string;
   private disposed = false;
+  private finished = false;
+  private shareOperation = 0;
+  private get inactive() {
+    return this.disposed || this.finished;
+  }
   constructor(
     private room: string,
     private notify: (s: MeetingState) => void,
@@ -53,15 +66,15 @@ export class MeetingController {
     }
   }
   async preview() {
-    if (this.state.acquiring || this.state.phase !== 'preview') return;
+    if (this.inactive || this.state.acquiring || this.state.phase !== 'preview') return;
     this.update({ acquiring: true, errors: [] });
     const errors = await this.media.acquire();
-    if (this.disposed) return;
+    if (this.inactive) return;
     const stream = this.media.stream;
     for (const track of stream.getTracks()) {
       track.enabled = track.kind === 'audio' ? this.state.mic : this.state.camera;
       track.onended = () => {
-        if (this.disposed) return;
+        if (this.inactive) return;
         this.update({
           hasMic: stream.getAudioTracks().some((t) => t.readyState === 'live'),
           hasCamera: stream.getVideoTracks().some((t) => t.readyState === 'live'),
@@ -79,6 +92,7 @@ export class MeetingController {
     });
   }
   toggleMic() {
+    if (this.inactive) return;
     const mic = !this.state.mic;
     this.media.stream.getAudioTracks().forEach((t) => {
       t.enabled = mic;
@@ -86,6 +100,7 @@ export class MeetingController {
     this.update({ mic });
   }
   toggleCamera() {
+    if (this.inactive) return;
     const camera = !this.state.camera;
     this.media.stream.getVideoTracks().forEach((t) => {
       t.enabled = camera;
@@ -93,7 +108,7 @@ export class MeetingController {
     this.update({ camera });
   }
   join() {
-    if (this.disposed || this.state.phase !== 'preview' || this.state.acquiring) return;
+    if (this.inactive || this.state.phase !== 'preview' || this.state.acquiring) return;
     try {
       const url = signalingUrl();
       iceConfiguration();
@@ -112,8 +127,10 @@ export class MeetingController {
     }
   }
   private message(message: ServerMessage) {
-    if (this.disposed) return;
+    if (this.inactive) return;
     if (message.type === 'error') {
+      this.finished = true;
+      this.shareOperation++;
       this.disconnect();
       this.media.dispose();
       this.update({
@@ -146,7 +163,9 @@ export class MeetingController {
         const peer = new Peer(
           iceConfiguration(),
           this.media.stream,
-          this.media.screen?.getVideoTracks()[0] ?? this.media.stream.getVideoTracks()[0] ?? null,
+          this.media.screen?.getVideoTracks().find((t) => t.readyState === 'live') ??
+            this.media.stream.getVideoTracks().find((t) => t.readyState === 'live') ??
+            null,
           message.offerer,
           {
             signal: (payload) => {
@@ -166,7 +185,7 @@ export class MeetingController {
               if (state === 'connected') this.update({ phase: 'connected', notice: '' });
               else if (state === 'disconnected')
                 this.update({
-                  phase: 'connecting',
+                  phase: 'reconnecting',
                   notice: 'Connection interrupted. Trying to recover…',
                 });
             },
@@ -190,56 +209,84 @@ export class MeetingController {
       void this.peer?.receive(message.id, message.payload);
   }
   async toggleShare() {
-    if (this.disposed || this.state.shareBusy) return;
+    if (this.inactive || this.state.shareBusy) return;
+    if (this.state.sharing) {
+      try {
+        await this.restoreCamera();
+      } catch {
+        this.fail('Could not restore the camera. Please rejoin.');
+      }
+      return;
+    }
+    const operation = ++this.shareOperation;
     this.update({ shareBusy: true, notice: '' });
     try {
-      if (this.state.sharing) {
-        try {
-          await this.restoreCamera();
-        } catch {
-          this.fail('Could not restore the camera. Please rejoin.');
-        }
-        return;
-      }
       const track = await this.media.captureScreen();
-      if (!track || this.disposed) return;
+      if (!track || this.inactive) return;
       track.onended = () => {
         void this.restoreCamera().catch(() =>
           this.fail('Could not restore the camera. Please rejoin.'),
         );
       };
-      // If pairing happens during the picker, use the current peer on resolution.
-      await this.peer?.replaceVideo(track);
-      if (this.disposed) return;
-      this.update({ sharing: true });
+      await this.replaceCurrentVideo(track);
+      if (this.inactive || operation !== this.shareOperation) return;
       if (track.readyState === 'ended') await this.restoreCamera();
+      else this.update({ sharing: true });
     } catch (error) {
+      if (this.inactive || operation !== this.shareOperation) return;
       this.media.stopScreen();
+      // A new participant may have adopted this screen while the old peer closed.
+      try {
+        await this.replaceCurrentVideo(this.cameraTrack());
+      } catch {
+        this.fail('Could not restore the camera. Please rejoin.');
+        return;
+      }
+      if (this.inactive || operation !== this.shareOperation) return;
       this.update({ sharing: false });
-      if (!(error instanceof Error && error.name === 'NotAllowedError'))
+      if (!(error instanceof Error && error.name === 'NotAllowedError')) {
         this.update({
-          notice: error instanceof Error ? error.message : 'Screen sharing could not start.',
+          notice: 'Screen sharing could not start. Try again with a supported desktop browser.',
         });
+      }
     } finally {
-      this.update({ shareBusy: false });
+      if (!this.inactive && operation === this.shareOperation) this.update({ shareBusy: false });
+    }
+  }
+  private cameraTrack() {
+    return this.media.stream.getVideoTracks().find((t) => t.readyState === 'live') ?? null;
+  }
+  private async replaceCurrentVideo(track: MediaStreamTrack | null) {
+    while (!this.inactive) {
+      const peer = this.peer;
+      try {
+        await peer?.replaceVideo(track);
+      } catch (error) {
+        if (peer === this.peer) throw error;
+      }
+      if (peer === this.peer) return;
     }
   }
   private async restoreCamera() {
-    const camera = this.media.stream.getVideoTracks().find((t) => t.readyState === 'live') ?? null;
+    if (this.inactive) return;
+    const operation = ++this.shareOperation;
     this.media.stopScreen();
     this.update({ sharing: false, shareBusy: true });
     try {
-      await this.peer?.replaceVideo(camera);
+      await this.replaceCurrentVideo(this.cameraTrack());
     } finally {
-      this.update({ shareBusy: false });
+      if (!this.inactive && operation === this.shareOperation) this.update({ shareBusy: false });
     }
   }
   private fail(message: string) {
-    if (this.disposed) return;
+    if (this.inactive) return;
+    this.finished = true;
+    this.shareOperation++;
     this.disconnect();
     this.media.dispose();
     this.update({
       phase: 'interrupted',
+      shareBusy: false,
       errors: [message],
       local: null,
       remote: null,
@@ -254,9 +301,12 @@ export class MeetingController {
     this.signaling = undefined;
   }
   leave() {
+    if (this.inactive) return;
+    this.finished = true;
+    this.shareOperation++;
     this.disconnect();
     this.media.dispose();
-    this.update({ phase: 'ended', local: null, remote: null, sharing: false });
+    this.update({ phase: 'ended', local: null, remote: null, sharing: false, shareBusy: false });
   }
   dispose() {
     this.disposed = true;

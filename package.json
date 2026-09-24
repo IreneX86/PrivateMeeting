@@ -18,7 +18,8 @@
     "start": "node dist-server/server/index.js",
     "preview": "vite preview --host 0.0.0.0",
     "test:pages": "npm run build && tsx tests/pages-smoke.ts",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "validate:production": "tsx scripts/validate-production.ts"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

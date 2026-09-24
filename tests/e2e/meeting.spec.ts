@@ -210,3 +210,48 @@ test('denied permissions stay actionable and receive-only joining remains availa
   ).toBeVisible();
   await page.getByRole('button', { name: 'Leave meeting' }).click();
 });
+
+test('signaling loss stops capture and offers a clean manual rejoin', async ({ page }) => {
+  await page.addInitScript(() => {
+    const Original = WebSocket;
+    const sockets: WebSocket[] = [];
+    window.WebSocket = class extends Original {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        sockets.push(this);
+      }
+    };
+    Object.defineProperty(window, 'disconnectMeeting', {
+      value: () => sockets.filter((s) => s.url.endsWith('/signal')).forEach((s) => s.close()),
+    });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Create Meeting' }).click();
+  await page.getByRole('button', { name: 'Enable camera & microphone' }).click();
+  await expect(page.getByLabel('Your camera preview')).toHaveJSProperty('readyState', 4);
+  await page.getByRole('button', { name: 'Join Meeting', exact: true }).click();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Waiting for another participant' }),
+  ).toBeVisible();
+  await page.getByLabel('Your video').evaluate((el: HTMLVideoElement) => {
+    const tracks = (el.srcObject as MediaStream).getTracks();
+    Object.defineProperty(window, 'captureStopped', {
+      value: () => tracks.every((t) => t.readyState === 'ended'),
+    });
+  });
+  await page.evaluate(() =>
+    (window as unknown as { disconnectMeeting: () => void }).disconnectMeeting(),
+  );
+  await expect(page.getByRole('heading', { name: 'Connection failed' })).toBeVisible();
+  expect(
+    await page.evaluate(() =>
+      (window as unknown as { captureStopped: () => boolean }).captureStopped(),
+    ),
+  ).toBe(true);
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await page.getByRole('button', { name: 'Join Meeting', exact: true }).click();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Waiting for another participant' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Leave meeting' }).click();
+});

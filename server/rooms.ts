@@ -25,6 +25,7 @@ export class RoomRegistry {
     socket.send(JSON.stringify(message));
   }
   handle(socket: WebSocket, message: ClientMessage) {
+    if (socket.readyState !== WebSocket.OPEN) return;
     if (message.type === 'leave') {
       this.remove(socket);
       socket.close(1000);

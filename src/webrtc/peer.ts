@@ -12,6 +12,9 @@ export class Peer {
   private remote = new MediaStream();
   private candidates: RTCIceCandidateInit[] = [];
   private seen = new Set<string>();
+  private seenCandidates = new Set<string>();
+  private started = false;
+  private videoQueue: Promise<void> = Promise.resolve();
   private queue: Promise<void> = Promise.resolve();
   private closed = false;
   private timer?: ReturnType<typeof setTimeout>;
@@ -27,7 +30,7 @@ export class Peer {
     // Only the offerer creates transceivers before SDP. The answerer must use
     // the offered transceivers; pre-creating its own can produce receive-only SDP.
     if (offerer) {
-      const audio = stream.getAudioTracks()[0];
+      const audio = stream.getAudioTracks().find((t) => t.readyState === 'live');
       this.connection.addTransceiver(audio ?? 'audio', {
         direction: 'sendrecv',
         streams: [stream],
@@ -42,6 +45,7 @@ export class Peer {
         callbacks.signal({ kind: 'candidate', candidate: event.candidate.toJSON() });
     };
     this.connection.ontrack = (event) => {
+      if (this.closed) return;
       if (!this.remote.getTracks().some((t) => t.id === event.track.id))
         this.remote.addTrack(event.track);
       callbacks.remote(this.remote);
@@ -60,6 +64,19 @@ export class Peer {
       if (state === 'disconnected') this.deadline();
     };
     this.connection.oniceconnectionstatechange = () => {
+      if (this.closed) return;
+      const ice = this.connection.iceConnectionState;
+      if (ice === 'disconnected') {
+        callbacks.state('disconnected');
+        this.deadline();
+      }
+      if (
+        (ice === 'connected' || ice === 'completed') &&
+        this.connection.connectionState === 'connected'
+      ) {
+        clearTimeout(this.timer);
+        callbacks.state('connected');
+      }
       if (this.connection.iceConnectionState === 'checking') callbacks.state('checking');
       if (this.connection.iceConnectionState === 'failed')
         callbacks.error(
@@ -86,13 +103,17 @@ export class Peer {
       .then(async () => {
         if (!this.closed) await job();
       })
-      .catch((error) => {
-        if (!this.closed) this.callbacks.error(error);
+      .catch(() => {
+        if (!this.closed)
+          this.callbacks.error(
+            new Error('Could not negotiate the media connection. Please rejoin.'),
+          );
       });
     return this.queue;
   }
   start() {
-    if (!this.offerer) return Promise.resolve();
+    if (!this.offerer || this.started || this.closed) return this.queue;
+    this.started = true;
     return this.enqueue(async () => {
       const offer = await this.connection.createOffer();
       if (this.closed) return;
@@ -111,6 +132,21 @@ export class Peer {
       return this.queue;
     }
     this.seen.add(id);
+    if (payload.kind === 'candidate') {
+      const c = payload.candidate;
+      const key = JSON.stringify([
+        c.candidate,
+        c.sdpMid ?? null,
+        c.sdpMLineIndex ?? null,
+        c.usernameFragment ?? null,
+      ]);
+      if (this.seenCandidates.has(key)) return this.queue;
+      if (this.seenCandidates.size >= 256) {
+        this.callbacks.error(new Error('Too many ICE candidates. Please rejoin.'));
+        return this.queue;
+      }
+      this.seenCandidates.add(key);
+    }
     return this.enqueue(async () => {
       if (payload.kind === 'candidate') {
         if (this.connection.remoteDescription)
@@ -145,9 +181,11 @@ export class Peer {
           transceiver.direction = 'sendrecv';
           transceiver.sender.setStreams(this.stream);
           if (kind === 'video') this.video = transceiver.sender;
-          await transceiver.sender.replaceTrack(
-            kind === 'video' ? this.outgoingVideo : (this.stream.getAudioTracks()[0] ?? null),
-          );
+          if (kind === 'video') await this.replaceVideo(this.outgoingVideo);
+          else
+            await transceiver.sender.replaceTrack(
+              this.stream.getAudioTracks().find((t) => t.readyState === 'live') ?? null,
+            );
         }
         if (this.closed) return;
         const answer = await this.connection.createAnswer();
@@ -161,16 +199,27 @@ export class Peer {
       }
     });
   }
-  async replaceVideo(track: MediaStreamTrack | null) {
+  replaceVideo(track: MediaStreamTrack | null): Promise<void> {
     this.outgoingVideo = track;
-    if (!this.closed) await this.video?.replaceTrack(track);
+    // Serialize replacements, including native Stop sharing during negotiation.
+    this.videoQueue = this.videoQueue
+      .catch(() => {})
+      .then(async () => {
+        if (!this.closed) await this.video?.replaceTrack(this.outgoingVideo);
+      });
+    return this.videoQueue;
   }
   close() {
     this.closed = true;
     clearTimeout(this.timer);
+    this.connection.ontrack = null;
+    this.connection.onicecandidate = null;
+    this.connection.onconnectionstatechange = null;
+    this.connection.oniceconnectionstatechange = null;
     this.connection.close();
     this.remote.getTracks().forEach((t) => t.stop());
     this.candidates = [];
     this.seen.clear();
+    this.seenCandidates.clear();
   }
 }

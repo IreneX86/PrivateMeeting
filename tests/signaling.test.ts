@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
-import type { AddressInfo } from 'node:net';
-import { createSignalingServer } from '../server/app';
+import { connect, type AddressInfo } from 'node:net';
+import { createSignalingServer, type ServerOptions } from '../server/app';
 import type { ServerMessage } from '../shared/protocol';
 import { createRoomId } from '../src/rooms';
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
-async function setup(maxRooms?: number) {
-  const app = createSignalingServer({ origins: ['http://localhost:5173'], maxRooms });
+async function setup(maxRooms?: number, options: Partial<ServerOptions> = {}) {
+  const app = createSignalingServer({ origins: ['http://localhost:5173'], maxRooms, ...options });
   cleanup.push(app.close);
   await new Promise<void>((resolve, reject) => {
     app.server.once('error', reject);
@@ -113,4 +113,127 @@ describe('real WebSocket signaling service', () => {
       expect(error.message).toContain('403');
     }
   });
+});
+
+const closed = (socket: WebSocket) =>
+  new Promise<number>((resolve) => socket.once('close', (code) => resolve(code)));
+describe('public signaling resilience', () => {
+  it('limits simultaneous source connections, including forged forwarding headers', async () => {
+    const { client, url } = await setup(undefined, { maxConnectionsPerIp: 1 });
+    const first = await client();
+    const rejected = new WebSocket(url, {
+      origin: 'http://localhost:5173',
+      headers: { 'X-Forwarded-For': '203.0.113.10' },
+    });
+    const error = await new Promise<Error>((resolve) => rejected.once('error', resolve));
+    expect(error.message).toContain('429');
+    const gone = closed(first.ws);
+    first.ws.close();
+    await gone;
+    const replacement = await client();
+    expect(replacement.ws.readyState).toBe(WebSocket.OPEN);
+  });
+  it('rate limits connection churn after sockets close', async () => {
+    const { client } = await setup(undefined, { connectionsPerMinute: 2 });
+    for (let i = 0; i < 2; i++) {
+      const c = await client();
+      const gone = closed(c.ws);
+      c.ws.close();
+      await gone;
+    }
+    await expect(client()).rejects.toThrow('429');
+  });
+  it('bounds total admitted sockets', async () => {
+    const { client } = await setup(undefined, { maxConnections: 1 });
+    await client();
+    await expect(client()).rejects.toThrow('503');
+  });
+  it('rejects oversized frames and cleans up the occupied room', async () => {
+    const { client, app } = await setup();
+    const c = await client();
+    c.send({ type: 'join', room: createRoomId() });
+    await eventually(() => app.registry.size === 1);
+    const gone = closed(c.ws);
+    c.ws.send('x'.repeat(65537));
+    await gone;
+    await eventually(() => app.registry.size === 0);
+  });
+  it('closes a flood and cannot rejoin on frames buffered after leave', async () => {
+    const { client, app } = await setup();
+    const flood = await client();
+    const room = createRoomId();
+    const floodGone = closed(flood.ws);
+    for (let i = 0; i < 210; i++) flood.send({ type: 'join', room });
+    expect(await floodGone).toBe(1008);
+    await eventually(() => app.registry.size === 0);
+    expect(flood.messages).toContainEqual(expect.objectContaining({ code: 'rate-limit' }));
+    const c = await client();
+    const gone = closed(c.ws);
+    c.send({ type: 'join', room });
+    c.send({ type: 'leave' });
+    c.send({ type: 'join', room: createRoomId() });
+    await gone;
+    expect(c.messages.filter((m) => m.type === 'joined')).toHaveLength(1);
+    expect(app.registry.size).toBe(0);
+  });
+  it('applies a byte budget independently of message count', async () => {
+    const { client } = await setup();
+    const a = await client(),
+      b = await client();
+    const room = createRoomId();
+    a.send({ type: 'join', room });
+    b.send({ type: 'join', room });
+    await eventually(() => a.messages.some((m) => m.type === 'paired'));
+    const pair = a.messages.find((m) => m.type === 'paired');
+    if (pair?.type !== 'paired') throw new Error('Pair missing');
+    const gone = closed(a.ws);
+    for (let i = 0; i < 6; i++)
+      a.send({
+        type: 'signal',
+        session: pair.session,
+        id: String(i),
+        payload: {
+          kind: 'description',
+          description: { type: 'offer', sdp: 'v=0' + 'x'.repeat(55000) },
+        },
+      });
+    expect(await gone).toBe(1008);
+    expect(a.messages).toContainEqual(expect.objectContaining({ code: 'rate-limit' }));
+  });
+  it('expires unjoined and non-responsive connections', async () => {
+    const idle = await setup(undefined, { admissionTimeoutMs: 30 });
+    const c = await idle.client();
+    expect(await closed(c.ws)).toBe(1008);
+    const dead = await setup(undefined, { heartbeatMs: 25 });
+    const ws = new WebSocket(dead.url, { origin: 'http://localhost:5173', autoPong: false });
+    await new Promise<void>((resolve) => ws.once('open', resolve));
+    ws.send(JSON.stringify({ type: 'join', room: createRoomId() }));
+    await closed(ws);
+    await eventually(() => dead.app.registry.size === 0);
+  });
+  it('closes with a going-away handshake and idempotent shutdown', async () => {
+    const { client, app } = await setup();
+    const c = await client();
+    c.send({ type: 'join', room: createRoomId() });
+    await eventually(() => app.registry.size === 1);
+    const gone = closed(c.ws);
+    const shutdown = app.close();
+    expect(app.close()).toBe(shutdown);
+    expect(await gone).toBe(1001);
+    await shutdown;
+    expect(app.registry.size).toBe(0);
+  });
+});
+
+it('bounds shutdown even with incomplete HTTP requests', async () => {
+  const { app } = await setup(undefined, { shutdownGraceMs: 30 });
+  const socket = connect((app.server.address() as AddressInfo).port, '127.0.0.1');
+  socket.on('error', () => {});
+  await new Promise<void>((resolve) => socket.once('connect', resolve));
+  socket.write('GET /health HTTP/1.1\r\nHost: localhost\r\n');
+  const gone = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+  const start = Date.now();
+  await app.close();
+  await gone;
+  expect(Date.now() - start).toBeLessThan(1500);
 });

@@ -82,6 +82,7 @@ describe('peer negotiation', () => {
       description: { type: 'offer', sdp: 'v=0' },
     });
     await peer.receive('ice', candidate);
+    await peer.receive('same-content-new-id', candidate);
     await peer.receive('offer', {
       kind: 'description',
       description: { type: 'offer', sdp: 'v=0' },
@@ -96,7 +97,7 @@ describe('peer negotiation', () => {
   });
   it('uses deterministic offer ownership and swaps tracks without negotiation', async () => {
     const { peer, pc } = make(true);
-    await peer.start();
+    await Promise.all([peer.start(), peer.start()]);
     expect(pc.createOffer).toHaveBeenCalledTimes(1);
     await peer.receive('unexpected', {
       kind: 'description',

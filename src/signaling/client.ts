@@ -16,7 +16,13 @@ export class SignalingClient {
         onClose();
       }
     }, 12000);
-    this.socket.onopen = () => this.socket.send(JSON.stringify({ type: 'join', room }));
+    this.socket.onopen = () => {
+      if (this.closed) {
+        this.socket.close();
+        return;
+      }
+      this.socket.send(JSON.stringify({ type: 'join', room }));
+    };
     this.socket.onmessage = (event) => {
       if (this.closed || typeof event.data !== 'string') return;
       const message = parseServerMessage(event.data);
@@ -33,7 +39,11 @@ export class SignalingClient {
     };
   }
   send(session: string, payload: Signal) {
-    if (this.closed || this.socket.readyState !== WebSocket.OPEN)
+    if (
+      this.closed ||
+      this.socket.readyState !== WebSocket.OPEN ||
+      this.socket.bufferedAmount > 256 * 1024
+    )
       throw new Error('The signaling connection was lost. Please rejoin.');
     this.socket.send(JSON.stringify({ type: 'signal', session, id: crypto.randomUUID(), payload }));
   }

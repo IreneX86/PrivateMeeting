@@ -14,4 +14,4 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist-server ./dist-server
 USER node
 EXPOSE 8787
-CMD ["npm", "start"]
+CMD ["node", "dist-server/server/index.js"]

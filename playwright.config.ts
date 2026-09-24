@@ -5,7 +5,7 @@ export default defineConfig({
   workers: 1,
   timeout: 45000,
   use: {
-    baseURL: 'http://localhost:5198',
+    baseURL: 'http://localhost:5199',
     headless: true,
     launchOptions: {
       args: [
@@ -20,16 +20,16 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'npm run dev -- --port 5198',
-      url: 'http://localhost:5198',
+      command: 'npm run dev -- --port 5199',
+      url: 'http://localhost:5199',
       reuseExistingServer: false,
-      env: { VITE_SIGNALING_URL: 'ws://localhost:8798/signal', VITE_STUN_URL: '' },
+      env: { VITE_SIGNALING_URL: 'ws://localhost:8799/signal', VITE_STUN_URLS: '' },
     },
     {
       command: 'npm run dev:server',
-      url: 'http://localhost:8798/health',
+      url: 'http://localhost:8799/health',
       reuseExistingServer: false,
-      env: { PORT: '8798', ALLOWED_ORIGINS: 'http://localhost:5198', NODE_ENV: 'test' },
+      env: { PORT: '8799', ALLOWED_ORIGINS: 'http://localhost:5199', NODE_ENV: 'test' },
     },
   ],
 });

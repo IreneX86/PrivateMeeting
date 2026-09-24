@@ -62,11 +62,13 @@ export function Room({ room }: { room: string }) {
   const title =
     state.phase === 'connected'
       ? 'Connected'
-      : state.phase === 'waiting'
-        ? 'Waiting for another participant...'
-        : state.phase === 'joining'
-          ? 'Joining meeting…'
-          : 'Connecting...';
+      : state.phase === 'reconnecting'
+        ? 'Reconnecting…'
+        : state.phase === 'waiting'
+          ? 'Waiting for another participant...'
+          : state.phase === 'joining'
+            ? 'Joining meeting…'
+            : 'Connecting...';
   const localVisible = state.camera && state.hasCamera;
   const micButton = (
     <Control
@@ -129,7 +131,7 @@ export function Room({ room }: { room: string }) {
               ? 'Until next time.'
               : state.phase === 'full'
                 ? 'Meeting room is full.'
-                : 'Connection interrupted'}
+                : 'Connection failed'}
           </h1>
           <p>
             {state.phase === 'ended'

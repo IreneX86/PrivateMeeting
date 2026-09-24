@@ -37,6 +37,13 @@ await new Promise<void>((resolve, reject) => {
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage();
+  // Check exactly what the copy feature passes to the Clipboard API, without
+  // replacing the developer's actual system clipboard during an automated test.
+  await page.addInitScript({
+    content: `Object.defineProperty(navigator, 'clipboard', {value: {
+    writeText: async function(value) { document.documentElement.dataset.copiedLink = value; }
+  }});`,
+  });
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('response', (response) => {
@@ -48,6 +55,8 @@ try {
   await page.getByRole('button', { name: 'Join Meeting', exact: true }).waitFor();
   assert.match(page.url(), /\/PrivateMeeting\/#\/room\/[a-f0-9]{48}$/);
   const shared = page.url();
+  await page.getByRole('button', { name: 'Copy invite link', exact: true }).click();
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.copiedLink), shared);
   assert.equal((await page.reload())?.status(), 200);
   await page.getByRole('button', { name: 'Join Meeting', exact: true }).waitFor();
   const fresh = await browser.newPage();
@@ -55,7 +64,7 @@ try {
   await fresh.getByRole('button', { name: 'Join Meeting', exact: true }).waitFor();
   assert.equal(errors.length, 0, errors.join('\n'));
   console.log(
-    'PASS: production assets, generated shared link, reload and fresh open under /PrivateMeeting/.',
+    'PASS: production assets, copied shared link, reload and fresh open under /PrivateMeeting/.',
   );
 } finally {
   await browser.close();

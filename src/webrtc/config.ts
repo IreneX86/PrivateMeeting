@@ -2,7 +2,7 @@ export function iceConfiguration(
   env: Record<string, string | boolean | undefined> = import.meta.env,
 ): RTCConfiguration {
   const iceServers: RTCIceServer[] = [];
-  const stun = String(env.VITE_STUN_URL ?? 'stun:stun.l.google.com:19302')
+  const stun = String(env.VITE_STUN_URLS ?? env.VITE_STUN_URL ?? 'stun:stun.l.google.com:19302')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
@@ -26,18 +26,38 @@ export function iceConfiguration(
       credential: String(env.VITE_TURN_CREDENTIAL),
     });
   }
-  return { iceServers, iceCandidatePoolSize: 0, bundlePolicy: 'max-bundle' };
+  return {
+    iceServers,
+    iceCandidatePoolSize: 0,
+    bundlePolicy: 'max-bundle',
+    iceTransportPolicy: 'all',
+  };
 }
-export function signalingUrl(): string {
-  const configured = import.meta.env.VITE_SIGNALING_URL;
-  const value = configured || (import.meta.env.DEV ? 'ws://localhost:8787/signal' : '');
+export function signalingUrl(
+  env: Record<string, string | boolean | undefined> = import.meta.env,
+  protocol: string = location.protocol,
+): string {
+  const configured = env.VITE_SIGNALING_URL;
+  const value = configured || (env.DEV ? 'ws://localhost:8787/signal' : '');
   if (!value)
     throw new Error('The signaling service is not configured. Set VITE_SIGNALING_URL and rebuild.');
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(String(value));
+  } catch {
+    throw new Error('Invalid VITE_SIGNALING_URL. Set the WebSocket endpoint and rebuild.');
+  }
   if (
     !['ws:', 'wss:'].includes(url.protocol) ||
-    (location.protocol === 'https:' && url.protocol !== 'wss:')
+    (protocol === 'https:' && url.protocol !== 'wss:') ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== '/signal'
   )
-    throw new Error('Use a secure wss:// signaling URL for an HTTPS website.');
+    throw new Error(
+      'Use a WebSocket URL ending in /signal, with no credentials, query or fragment. HTTPS websites require wss://.',
+    );
   return url.href;
 }

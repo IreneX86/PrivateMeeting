@@ -1,0 +1,44 @@
+name: Deploy frontend to GitHub Pages
+# Manual only: changes are never published merely by pushing.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck && npm run lint && npm test && npm run build:server
+      - name: Validate signaling configuration
+        env:
+          SIGNALING_URL: ${{ vars.VITE_SIGNALING_URL }}
+        run: node -e 'const u = new URL(process.env.SIGNALING_URL); if (u.protocol !== "wss:") throw new Error("Set repository variable VITE_SIGNALING_URL to your wss:// signaling endpoint");'
+      - run: npm run build
+        env:
+          VITE_BASE_PATH: './'
+          VITE_SIGNALING_URL: ${{ vars.VITE_SIGNALING_URL }}
+          VITE_STUN_URL: ${{ vars.VITE_STUN_URL || 'stun:stun.l.google.com:19302' }}
+          VITE_TURN_URL: ${{ vars.VITE_TURN_URL }}
+          VITE_TURN_USERNAME: ${{ vars.VITE_TURN_USERNAME }}
+          VITE_TURN_CREDENTIAL: ${{ secrets.VITE_TURN_CREDENTIAL }}
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

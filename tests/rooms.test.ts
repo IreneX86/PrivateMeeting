@@ -63,19 +63,54 @@ describe('untrusted signaling validation', () => {
   });
 });
 describe('ICE configuration', () => {
-  it('works with STUN alone and supports multiple TURN transports', () => {
+  it('works with STUN alone and builds one credentialed entry from multiple TURN URLs', () => {
     expect(iceConfiguration({}).iceServers).toHaveLength(1);
     const config = iceConfiguration({
       VITE_STUN_URLS: '',
-      VITE_TURN_URL: 'turn:relay.example:3478,turns:relay.example:5349',
+      VITE_TURN_URLS:
+        'turn:relay.example:80,turn:relay.example:80?transport=tcp,turns:relay.example:443?transport=tcp',
       VITE_TURN_USERNAME: 'demo',
       VITE_TURN_CREDENTIAL: 'public-demo',
     });
     expect(config.iceServers).toHaveLength(1);
-    expect(config.iceServers![0].urls).toHaveLength(2);
+    expect(config.iceServers![0]).toEqual({
+      urls: [
+        'turn:relay.example:80',
+        'turn:relay.example:80?transport=tcp',
+        'turns:relay.example:443?transport=tcp',
+      ],
+      username: 'demo',
+      credential: 'public-demo',
+    });
+    expect(config.iceTransportPolicy).toBe('all');
+  });
+  it('preserves singular TURN fallback and lets an explicit plural value take precedence', () => {
+    const legacy = iceConfiguration({
+      VITE_STUN_URLS: '',
+      VITE_TURN_URL: 'turn:legacy.example:3478',
+      VITE_TURN_USERNAME: 'legacy-user',
+      VITE_TURN_CREDENTIAL: 'legacy-credential',
+    });
+    expect(legacy.iceServers![0].urls).toEqual(['turn:legacy.example:3478']);
+
+    const disabled = iceConfiguration({
+      VITE_STUN_URLS: '',
+      VITE_TURN_URLS: '',
+      VITE_TURN_URL: 'turn:legacy.example:3478',
+      VITE_TURN_USERNAME: 'legacy-user',
+      VITE_TURN_CREDENTIAL: 'legacy-credential',
+    });
+    expect(disabled.iceServers).toEqual([]);
   });
   it('rejects incomplete or non-ICE configuration', () => {
-    expect(() => iceConfiguration({ VITE_TURN_URL: 'turn:example.com' })).toThrow();
+    expect(() => iceConfiguration({ VITE_TURN_URLS: 'turn:example.com' })).toThrow();
+    expect(() =>
+      iceConfiguration({
+        VITE_TURN_URLS: 'https://example.com',
+        VITE_TURN_USERNAME: 'user',
+        VITE_TURN_CREDENTIAL: 'credential',
+      }),
+    ).toThrow();
     expect(() => iceConfiguration({ VITE_STUN_URLS: 'https://example.com' })).toThrow();
   });
 });

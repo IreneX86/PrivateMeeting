@@ -9,7 +9,7 @@ export function iceConfiguration(
   if (stun.some((url) => !/^stuns?:[^\s]+$/.test(url)))
     throw new Error('Invalid STUN URL configuration.');
   if (stun.length) iceServers.push({ urls: stun });
-  const turn = String(env.VITE_TURN_URL || '')
+  const turn = String(env.VITE_TURN_URLS ?? env.VITE_TURN_URL ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);

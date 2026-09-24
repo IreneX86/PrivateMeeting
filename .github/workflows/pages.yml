@@ -32,7 +32,7 @@ jobs:
           VITE_BASE_PATH: './'
           VITE_SIGNALING_URL: ${{ vars.VITE_SIGNALING_URL }}
           VITE_STUN_URLS: ${{ vars.VITE_STUN_URLS || vars.VITE_STUN_URL || 'stun:stun.l.google.com:19302' }}
-          VITE_TURN_URL: ${{ vars.VITE_TURN_URL }}
+          VITE_TURN_URLS: ${{ vars.VITE_TURN_URLS || vars.VITE_TURN_URL }}
           VITE_TURN_USERNAME: ${{ vars.VITE_TURN_USERNAME }}
           VITE_TURN_CREDENTIAL: ${{ secrets.VITE_TURN_CREDENTIAL }}
       - name: Check built Pages assets and shared links
